@@ -1,0 +1,103 @@
+#!/bin/bash
+
+### Shell options ###
+
+set -eu
+[[ "${DEBUG:-}" = x ]] && set -x
+
+### Functions ###
+
+is_invalid_name() {
+    [[ -z "$1" || "$1" = . || "$1" = .. || "$1" = */* ]]
+}
+
+contains() {
+    local needle=$1
+    shift
+
+    while [[ $# > 0 ]]; do
+        [[ "$needle" = "$1" ]] && return 0
+        shift
+    done
+
+    return 1
+}
+
+### Argument parsing ###
+
+if [[ $# < 2 || "$1" = --help ]]; then
+    echo "usage: gh bulk-clone <repo-list-file> <output-dir> [<sparse-checkout-pattern>...] [-- <clone-option>...]" >&2
+    if [[ "${1:-}" = --help ]]; then
+        exit
+    else
+        exit 1
+    fi
+fi
+
+repo_list_file=$1
+shift
+output_dir=$1
+shift
+
+sparse_checkout_patterns=()
+while [[ $# > 0 && "$1" != -- ]]; do
+    sparse_checkout_patterns+=("$1")
+    shift
+done
+
+[[ "${1:-}" = -- ]] && shift
+clone_options=("$@")
+
+bare=no
+if contains --bare "${clone_options[@]+"${clone_options[@]}"}"; then
+    bare=yes
+fi
+
+checkout=yes
+if contains -n "${clone_options[@]+"${clone_options[@]}"}" || \
+    contains --no-checkout "${clone_options[@]+"${clone_options[@]}"}" || \
+    [[ "$bare" = yes ]]
+then
+    checkout=no
+fi
+
+### Main ###
+
+while IFS= read -r repo_url; do
+    owner_name=$(basename "$(dirname "$repo_url")")
+    owner_name=${owner_name##*:}
+    repo_name=$(basename "$repo_url" .git)
+
+    if is_invalid_name "$owner_name"; then
+        echo "fatal: invalid owner name in '$repo_url'." >&2
+        exit 1
+    fi
+
+    if is_invalid_name "$repo_name"; then
+        echo "fatal: invalid repository name in '$repo_url'." >&2
+        exit 1
+    fi
+
+    repo_path="$output_dir/$owner_name/$repo_name"
+
+    if [[ "$bare" = yes ]]; then
+        repo_path="${repo_path}.git"
+    fi
+
+    if [[ -e "$repo_path" ]]; then
+        echo "error: destination path '$repo_path' already exists." >&2
+        continue
+    fi
+
+    if [[ "${#sparse_checkout_patterns[@]}" > 0 ]]; then
+        git clone --no-checkout "${clone_options[@]+"${clone_options[@]}"}" -- "$repo_url" "$repo_path" && (
+            cd "$repo_path"
+            git sparse-checkout set -- "${sparse_checkout_patterns[@]}"
+            if [[ "$checkout" = yes ]]; then
+                git checkout
+            fi
+        )
+    else
+        git clone "${clone_options[@]+"${clone_options[@]}"}" -- "$repo_url" "$repo_path"
+    fi
+done <<< "$(cat -- "$repo_list_file")"
